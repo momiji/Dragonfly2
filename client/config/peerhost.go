@@ -523,6 +523,8 @@ type RegistryMirror struct {
 
 	// Whether to use proxies to decide when to use dragonfly
 	UseProxies bool `yaml:"useProxies" mapstructure:"useProxies"`
+
+	Mirrors []*MirrorConfig `yaml:"mirrors" mapstructure:"mirrors"`
 }
 
 // TLSConfig returns the tls.Config used to communicate with the mirror.
@@ -744,4 +746,18 @@ type WhiteList struct {
 type BasicAuth struct {
 	Username string `json:"username" yaml:"username"`
 	Password string `json:"password" yaml:"password"`
+}
+
+// MirrorConfig is a mirror configuration to change the request uri in direct mode, like apache ProxyPass
+type MirrorConfig struct {
+	// Regex to use mirror, groups can be used in URL to build new url
+	Regx *Regexp `yaml:"regx" mapstructure:"regx"`
+
+	// Remote url for the registry mirror
+	Remote *URL `yaml:"url" mapstructure:"url"`
+}
+
+// Match checks if the given url matches the rule.
+func (r *MirrorConfig) Match(url string) bool {
+	return r.Regx != nil && r.Regx.MatchString(url)
 }

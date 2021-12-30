@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -28,10 +29,11 @@ import (
 )
 
 type testItem struct {
-	URL      string
-	Direct   bool
-	UseHTTPS bool
-	Redirect string
+	URL       string
+	Direct    bool
+	UseHTTPS  bool
+	Redirect  string
+	ResultUrl string
 }
 
 type testCase struct {
@@ -72,8 +74,27 @@ func (tc *testCase) WithRegistryMirror(rawURL string, direct bool, dynamic bool,
 	return tc
 }
 
-func (tc *testCase) WithTest(url string, direct bool, useHTTPS bool, redirect string) *testCase {
-	tc.Items = append(tc.Items, testItem{url, direct, useHTTPS, redirect})
+func (tc *testCase) WithMirror(regx string, rawURL string) *testCase {
+	if tc.Error != nil {
+		return tc
+	}
+
+	var u *url.URL
+	u, tc.Error = url.Parse(rawURL)
+	if tc.Error != nil {
+		return tc
+	}
+	var r *regexp.Regexp
+	r, tc.Error = regexp.Compile(regx)
+	tc.RegistryMirror.Mirrors = append(tc.RegistryMirror.Mirrors, &config.MirrorConfig{
+		Regx:   &config.Regexp{Regexp: r},
+		Remote: &config.URL{URL: u},
+	})
+	return tc
+}
+
+func (tc *testCase) WithTest(url string, direct bool, useHTTPS bool, redirect string, resultUrl string) *testCase {
+	tc.Items = append(tc.Items, testItem{url, direct, useHTTPS, redirect, resultUrl})
 	return tc
 }
 
@@ -91,6 +112,7 @@ func (tc *testCase) Test(t *testing.T) {
 		if !a.Nil(err) {
 			continue
 		}
+		req.RequestURI = req.URL.RequestURI()
 		if !a.Equal(tp.shouldUseDragonfly(req), !item.Direct) {
 			fmt.Println(item.URL)
 		}
@@ -119,8 +141,20 @@ func (tc *testCase) TestMirror(t *testing.T) {
 		if !a.Nil(err) {
 			continue
 		}
+		req.RequestURI = req.URL.RequestURI()
 		if !a.Equal(tp.shouldUseDragonflyForMirror(req), !item.Direct) {
 			fmt.Println(item.URL)
+		}
+		if item.UseHTTPS {
+			a.Equal(req.URL.Scheme, "https")
+		} else {
+			a.Equal(req.URL.Scheme, "http")
+		}
+		if item.Redirect != "" {
+			a.Equal(item.Redirect, req.Host)
+		}
+		if item.ResultUrl != "" {
+			a.Equal(item.ResultUrl, req.URL.String())
 		}
 	}
 }
@@ -128,8 +162,8 @@ func (tc *testCase) TestMirror(t *testing.T) {
 func TestMatch(t *testing.T) {
 	newTestCase().
 		WithRule("/blobs/sha256/", false, false, "").
-		WithTest("http://index.docker.io/v2/blobs/sha256/xxx", false, false, "").
-		WithTest("http://index.docker.io/v2/auth", true, false, "").
+		WithTest("http://index.docker.io/v2/blobs/sha256/xxx", false, false, "", "").
+		WithTest("http://index.docker.io/v2/auth", true, false, "", "").
 		Test(t)
 
 	newTestCase().
@@ -138,35 +172,35 @@ func TestMatch(t *testing.T) {
 		WithRule("/a", false, false, "").
 		WithRule("/a/c", true, false, "").
 		WithRule("/a/e", false, true, "").
-		WithTest("http://h/a", false, false, "").   // should match /a
-		WithTest("http://h/a/b", true, false, "").  // should match /a/b
-		WithTest("http://h/a/c", false, false, ""). // should match /a, not /a/c
-		WithTest("http://h/a/d", false, true, "").  // should match /a/d and use https
-		WithTest("http://h/a/e", false, false, ""). // should match /a, not /a/e
+		WithTest("http://h/a", false, false, "", "").   // should match /a
+		WithTest("http://h/a/b", true, false, "", "").  // should match /a/b
+		WithTest("http://h/a/c", false, false, "", ""). // should match /a, not /a/c
+		WithTest("http://h/a/d", false, true, "", "").  // should match /a/d and use https
+		WithTest("http://h/a/e", false, false, "", ""). // should match /a, not /a/e
 		Test(t)
 
 	newTestCase().
 		WithRule("/a/f", false, false, "r").
-		WithTest("http://h/a/f", false, false, "r"). // should match /a/f and redirect
+		WithTest("http://h/a/f", false, false, "r", ""). // should match /a/f and redirect
 		Test(t)
 
 	newTestCase().
-		WithTest("http://h/a", true, false, "").
+		WithTest("http://h/a", true, false, "", "").
 		TestMirror(t)
 
 	newTestCase().
 		WithRegistryMirror("http://index.docker.io", false, false, false).
-		WithTest("http://h/a", true, false, "").
+		WithTest("http://h/a", true, false, "", "").
 		TestMirror(t)
 
 	newTestCase().
 		WithRegistryMirror("http://index.docker.io", false, false, false).
-		WithTest("http://index.docker.io/v2/blobs/sha256/xxx", false, false, "").
+		WithTest("http://index.docker.io/v2/blobs/sha256/xxx", false, false, "", "").
 		TestMirror(t)
 
 	newTestCase().
 		WithRegistryMirror("http://index.docker.io", true, false, false).
-		WithTest("http://index.docker.io/v2/blobs/sha256/xxx", true, false, "").
+		WithTest("http://index.docker.io/v2/blobs/sha256/xxx", true, false, "", "").
 		TestMirror(t)
 }
 
@@ -174,20 +208,46 @@ func TestMatchWithUseProxies(t *testing.T) {
 	// should direct as registry is set with direct=false and no proxies are defined
 	newTestCase().
 		WithRegistryMirror("http://index.docker.io", false, false, true).
-		WithTest("http://index.docker.io/v2/blobs/sha256/xxx", true, false, "").
+		WithTest("http://index.docker.io/v2/blobs/sha256/xxx", true, false, "", "").
 		TestMirror(t)
 
 	// should cache as registry is set with direct=false, and one proxy matches
 	newTestCase().
 		WithRegistryMirror("http://index.docker.io", false, false, true).
 		WithRule("/blobs/sha256/", false, false, "").
-		WithTest("http://index.docker.io/v2/blobs/sha256/xxx", false, false, "").
+		WithTest("http://index.docker.io/v2/blobs/sha256/xxx", false, false, "", "").
 		TestMirror(t)
 
 	// should direct as registry is set with direct=true, even if one proxy matches
 	newTestCase().
 		WithRegistryMirror("http://index.docker.io", true, false, true).
 		WithRule("/blobs/sha256/", false, false, "").
-		WithTest("http://index.docker.io/v2/blobs/sha256/xxx", true, false, "").
+		WithTest("http://index.docker.io/v2/blobs/sha256/xxx", true, false, "", "").
+		TestMirror(t)
+}
+
+func TestMatchWithMirrors(t *testing.T) {
+	// no mirror match
+	newTestCase().
+		WithRegistryMirror("http://index.docker.io", false, false, true).
+		WithRule("/blobs/sha256/", false, false, "").
+		WithMirror("^/google/(.*)", "https://www.google.com/$1").
+		WithTest("http://index.docker.io/v2/blobs/sha256/xxx", false, false, "", "").
+		TestMirror(t)
+
+	// mirror and rule match
+	newTestCase().
+		WithRegistryMirror("http://index.docker.io", false, false, true).
+		WithRule("/blobs/sha256/", false, false, "").
+		WithMirror("^/google/(.*)", "http://www.google.com/$1").
+		WithTest("http://index.docker.io/google/blobs/sha256/xxx", false, false, "", "http://www.google.com/blobs/sha256/xxx").
+		TestMirror(t)
+
+	// should direct as mirror matches and rule matches result url
+	newTestCase().
+		WithRegistryMirror("http://index.docker.io", false, false, true).
+		WithMirror("^/google/(.*)", "http://www.google.com/blobs/$1").
+		WithRule("/blobs/sha256/", false, false, "").
+		WithTest("http://index.docker.io/google/sha256/xxx", false, false, "", "http://www.google.com/blobs/sha256/xxx").
 		TestMirror(t)
 }

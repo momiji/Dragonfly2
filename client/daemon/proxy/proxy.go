@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -548,11 +549,31 @@ func (proxy *Proxy) shouldUseDragonfly(req *http.Request) bool {
 }
 
 // shouldUseDragonflyForMirror returns whether we should use dragonfly to proxy a request
-// when we use registry mirror.
+// when we use registry mirror. It also changes the target URL if the given request matched
+// a mirror or a proxy whe useProxies = true
+// mirror is found or
 func (proxy *Proxy) shouldUseDragonflyForMirror(req *http.Request) bool {
+	// return false if no registry is configured
 	if proxy.registry == nil || proxy.registry.Direct {
 		return false
 	}
+
+	// find matching mirror and alter request
+	var err error
+	for _, mirror := range proxy.registry.Mirrors {
+		if mirror.Match(req.RequestURI) {
+			// update URL with mirror replacement
+			req.URL, err = url.Parse(mirror.Regx.ReplaceAllString(req.RequestURI, mirror.Remote.URL.String()))
+			if err != nil {
+				req.URL = mirror.Remote.URL
+			}
+			req.RequestURI = req.URL.RequestURI()
+			req.Host = req.URL.Host
+			break
+		}
+	}
+
+	// return if dragonfly should be used
 	if proxy.registry.UseProxies {
 		return proxy.shouldUseDragonfly(req)
 	}

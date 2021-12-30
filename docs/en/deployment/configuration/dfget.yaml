@@ -210,6 +210,10 @@ proxy:
     direct: false
     # whether to use proxies to decide if dragonfly should be used
     useProxies: false
+    # additional url rewrite similar to apache ProxyPass directive. If no regx matches, use registryMirror url
+    # mirrors:
+    #  - regx: ^/google/(.*)
+    #    url: https://www.google.com/$1
 
   proxies:
     # proxy all http image layer download requests with dfget
